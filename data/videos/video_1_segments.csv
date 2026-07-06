@@ -1,0 +1,6 @@
+segment_id,QualityRate1_size,QualityRate2_size,QualityRate3_size,Filename
+1,400,700,1300,segment_1
+2,450,750,1350,segment_2
+3,420,720,1320,segment_3
+4,500,800,1500,segment_4
+5,430,730,1330,segment_5
