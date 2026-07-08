@@ -14,6 +14,17 @@ class Client:
 
         )
 
+        #ABR variables
+        self.bandwidth_history=[]
+        self.abr_decision_logs = []
+        self.throughput_history=[]
+
+        # ABR configuration
+        self.low_buffer_threshold = 4
+        self.high_buffer_threshold = 12
+        self.safety_factor = 0.8
+
+
         #connection variables
         self.connected_to_server=False
 
@@ -66,10 +77,61 @@ class Client:
             return True
         
         return False
+# select bitrate on the basis of history bandwidth
+    def select_bitrate(self):
+        estimated_throughput = self.calculate_throughput()
+        if estimated_throughput is None:
+            selected_bitrate = self.available_qualities[0]
 
+            self.last_selected_bitrate_kbps = selected_bitrate
+
+            self.logs.append({
+                "action": "ABR_QUALITY_SELECTED",
+                "reason": "NO_BANDWIDTH_HISTORY_START_LOW",
+                "selected_quality": selected_bitrate,
+                "buffer_level": self.buffer_level
+            })
+
+            self.abr_decision_logs.append({
+                "reason": "NO_BANDWIDTH_HISTORY_START_LOW",
+                "estimated_throughput": None,
+                "available_qualities": self.available_qualities,
+                "selected_quality": selected_bitrate,
+                "buffer_level": self.buffer_level
+            })
+            return selected_bitrate
+
+        selected_bitrate = self.available_qualities[0]
+
+        for bitrate in self.available_qualities:
+            if bitrate <= estimated_throughput:
+                selected_bitrate = bitrate
+
+        if self.last_selected_bitrate_kbps is not None:
+            if selected_bitrate != self.last_selected_bitrate_kbps:
+                self.quality_switch_count += 1
+
+        self.last_selected_bitrate_kbps = selected_bitrate
+
+        self.logs.append({
+            "action": "ABR_QUALITY_SELECTED",
+            "estimated_throughput": estimated_throughput,
+            "available_qualities": self.available_qualities,
+            "selected_quality": selected_bitrate,
+            "buffer_level": self.buffer_level
+        })
+
+        self.abr_decision_logs.append({
+            "estimated_throughput": estimated_throughput,
+            "available_qualities": self.available_qualities,
+            "selected_quality": selected_bitrate,
+            "buffer_level": self.buffer_level
+        })
+
+        return selected_bitrate   
     
     # select the best bitrate as per the bandwidth
-    def select_bitrate(self, current_bandwidth):
+    def select_bitrate_old(self, current_bandwidth):
         if current_bandwidth<=self.available_qualities[0]:
             raise ValueError(
                   "Bandwidth too low."
@@ -92,7 +154,55 @@ class Client:
         })
 
         return selected_bitrate
+    
+    #This will calculate the throughput
 
+    def get_average_previous_bandwidth(self, window_size=3):
+        if not self.bandwidth_history:
+            return None
+
+        recent_bandwidths = self.bandwidth_history[-window_size:]
+        average_bandwidth = sum(recent_bandwidths) / len(recent_bandwidths)
+
+        return average_bandwidth
+
+
+    def calculate_throughput(self):
+        average_previous_bandwidth = self.get_average_previous_bandwidth(window_size=3)
+
+        if average_previous_bandwidth is None:
+            self.logs.append({
+                "action": "THROUGHPUT_ESTIMATION",
+                "reason": "NO_PREVIOUS_BANDWIDTH",
+                "estimated_throughput": None,
+                "buffer_level": self.buffer_level
+            })
+
+            return None
+
+        estimated_throughput = average_previous_bandwidth * self.safety_factor
+        buffer_state = "MEDIUM"
+
+        if self.buffer_level < self.low_buffer_threshold:
+            estimated_throughput = estimated_throughput * 0.7
+            buffer_state = "LOW"
+
+        elif self.buffer_level > self.high_buffer_threshold:
+            estimated_throughput = estimated_throughput * 1.1
+            buffer_state = "HIGH"
+
+        self.throughput_history.append(estimated_throughput)
+
+        self.logs.append({
+            "action": "THROUGHPUT_ESTIMATION",
+            "average_previous_bandwidth": average_previous_bandwidth,
+            "safety_factor": self.safety_factor,
+            "buffer_level": self.buffer_level,
+            "buffer_state": buffer_state,
+            "estimated_throughput": estimated_throughput
+        })
+
+        return estimated_throughput
     #add segment to buffer
     #client will hold sending event request if the buffer level is full.
 
@@ -151,7 +261,7 @@ class Client:
   
     #create segment request for server
     def create_segment_request_event (self,event_time,server_id,segment_id,current_bandwidth):
-        selected_quality=self.select_bitrate(current_bandwidth)
+        selected_quality=self.select_bitrate()
         deadline_time = event_time + self.buffer_level
 
 
@@ -178,11 +288,13 @@ class Client:
     
     #handle segment received from server
     def handle_segment_received_event(self, segment_event):
+        measured_bandwidth_kbps = (segment_event.segment_size / segment_event.download_time)
+
+        self.last_measured_bandwidth_kbps = measured_bandwidth_kbps
+        self.bandwidth_history.append(measured_bandwidth_kbps)
+
         self.add_to_buffer(segment_id=segment_event.segment_id,
                            segment_duration=segment_event.segment_duration)
-        self.last_measured_bandwidth_kbps = (
-        segment_event.segment_size /segment_event.download_time
-    )
         self.start_playback(segment_event.event_time)
         self.logs.append({
             "action": "SEGMENT_RECEIVED_HANDLED",
@@ -199,7 +311,6 @@ class Client:
     def create_connection_request_event(self, event_time, server_id):
         connection_event=ConnectionRequestEvent(
           event_time=event_time,
-          client_id=self.client_id,
           server_id=server_id
       )
         self.logs.append({
