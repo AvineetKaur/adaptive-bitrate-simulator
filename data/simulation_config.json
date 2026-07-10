@@ -1,0 +1,36 @@
+{
+  "server": {
+    "server_id": "server_1",
+    "ip_address": "127.0.0.1",
+    "port": 5000
+  },
+
+    "output_log_file": "outputs/logs/simulation_logs.json",
+    "output_metrics_directory": "outputs/metrics",
+    
+  "videos": [
+    {
+      "video_name": "video_1",
+      "dataset_path": "data/videos/video_1_segments.csv",
+      "segment_duration": 4
+    },
+    {
+      "video_name": "video_2",
+      "dataset_path": "data/videos/video_2_segments.csv",
+      "segment_duration": 4
+    }
+  ],
+  "clients": [
+    {
+      "client_id": "client_1",
+      "video_name": "video_1",
+      "bandwidth_file": "data/traces/client_1_bandwidth.csv"
+    },
+    {
+      "client_id": "client_2",
+      "video_name": "video_2",
+      "bandwidth_file": "data/traces/client_2_bandwidth.csv"
+    }
+  ]
+
+}

@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 from pprint import pprint
+import json
+from pathlib import Path
 
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
@@ -133,3 +135,19 @@ pprint(client.logs)
 
 print("\nServer logs:")
 pprint(server.logs)
+output_dir = Path("outputs/logs")
+output_dir.mkdir(parents=True, exist_ok=True)
+
+client_log_file = output_dir / "client_1_logs.json"
+
+with open(client_log_file, "w") as file:
+    json.dump(client.logs, file, indent=4)
+
+server_log_file = output_dir / "server_logs.json"
+
+with open(server_log_file, "w") as file:
+    json.dump(server.logs, file, indent=4)
+
+print("\nLogs saved successfully:")
+print(client_log_file)
+print(server_log_file)

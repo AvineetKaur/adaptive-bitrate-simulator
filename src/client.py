@@ -260,7 +260,7 @@ class Client:
         return rebuffer_time   
   
     #create segment request for server
-    def create_segment_request_event (self,event_time,server_id,segment_id,current_bandwidth):
+    def create_segment_request_event (self,event_time,server_id,segment_id):
         selected_quality=self.select_bitrate()
         deadline_time = event_time + self.buffer_level
 
@@ -311,6 +311,7 @@ class Client:
     def create_connection_request_event(self, event_time, server_id):
         connection_event=ConnectionRequestEvent(
           event_time=event_time,
+          client_id=self.client_id,
           server_id=server_id
       )
         self.logs.append({
