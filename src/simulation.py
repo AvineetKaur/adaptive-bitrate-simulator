@@ -5,7 +5,8 @@ from src.connection_handler import ConnectionHandler
 from src.event_queue import EventQueue
 from src.simulation_logger import SimulationLogger
 from src.metrics_generator import MetricsGenerator
-
+from datetime import datetime
+from pathlib import Path
 
 class Simulation:
     def __init__(self, config: dict):
@@ -16,24 +17,61 @@ class Simulation:
 
         self.clients = {}
         self.client_video_map = {}
-        self.connection = None
+        self.connections= {}
+        self.event_queue = EventQueue()
+
         self.final_times = {}
 
         output_log_file = config.get(
             "output_log_file",
             "outputs/logs/simulation_logs.json"
         )
+        configured_run_id = config.get("run_id")
+        if configured_run_id:
+            self.run_id = configured_run_id
+        else:
+            timestamp = datetime.now().strftime(
+                "%Y%m%d_%H%M%S_%f"
+            )
+
+            self.run_id = f"run_{timestamp[:-3]}"
+        self.run_output_directory = (Path("outputs/runs") / self.run_id)
+
+        self.log_directory = (
+            self.run_output_directory / "logs"
+            )
+
+        self.metrics_directory = (
+            self.run_output_directory / "metrics"
+            )           
+
+        self.log_directory.mkdir(
+            parents=True,
+            exist_ok=True
+            )
+
+        self.metrics_directory.mkdir(
+            parents=True,
+            exist_ok=True
+            )       
+        combined_log_file = (self.log_directory/ "simulation_logs.json")
 
         self.logger = SimulationLogger(
-            output_file=output_log_file
+            output_file=str(combined_log_file)
         )
-        output_metrics_directory = config.get(
-            "output_metrics_directory",
-            "outputs/metrics")
 
         self.metrics_generator = MetricsGenerator(
-            input_log_file=output_log_file,
-            output_directory=output_metrics_directory)
+            input_log_file=str(combined_log_file),
+            output_directory=str(
+                self.metrics_directory
+            )
+        )
+
+        print(f"Run ID: {self.run_id}")
+        print(
+            f"Output folder: "
+            f"{self.run_output_directory}"
+        )
         
 
     def setup(self) -> None:
@@ -86,132 +124,33 @@ class Simulation:
                 f"Created {client_id}, assigned to {video_name}"
             )
 
-    def _create_connection_handler(self) -> None:
-        self.connection = ConnectionHandler(
-            connection_id="shared_connection",
+    def _create_connection_handler(self):
+        for client_id in self.clients:
+            self.connections[client_id] = ConnectionHandler(
+            connection_id=f"connection_{client_id}",
             client_socket=None,
             server_socket=self.server.server_socket
-        )
-
-    def run(self) -> None:
-        for client_id, client in self.clients.items():
-            video_name = self.client_video_map[client_id]
-
-            print("\n================================")
-            print(f"Running client: {client_id}")
-            print(f"Watching video: {video_name}")
-            print("================================")
-
-            final_time = self._run_client_flow(
-                client=client,
-                video_name=video_name
             )
+    def _schedule_initial_events(self):
+        for client_id, client in self.clients.items():
+            connection_request = client.create_connection_request_event(
+                event_time=0,
+                server_id=self.server.server_id
+                )
+            self.event_queue.add_event(connection_request)
 
-            self.final_times[client_id] = final_time
+    def run(self):
+        self._schedule_initial_events()
 
+        while self.event_queue.has_events():
+            event = self.event_queue.get_next_event()
+            elapsed_time = self.event_queue.get_elapsed_time()
+            self._advance_all_clients(elapsed_time)
+            self._dispatch_event(event)
         self._print_summary()
         self._save_logs()
         self._generate_metrics()
 
-    def _run_client_flow(
-        self,
-        client: Client,
-        video_name: str
-    ) -> float:
-        event_queue = EventQueue()
-
-        # 1. Connection flow
-        self.connection.establish_connection(
-            client=client,
-            server=self.server,
-            event_time=0,
-            server_id=self.server.server_id
-        )
-
-        # 2. MPD flow
-        mpd_request = client.create_mpd_request_event(
-            event_time=0.1,
-            server_id=self.server.server_id,
-            video_name=video_name
-        )
-
-        self.connection.send_request_to_server(
-            mpd_request
-        )
-
-        mpd_response = self.server.handle_mpd_request_event(
-            mpd_request
-        )
-
-        self.connection.send_response_to_client(
-            mpd_response
-        )
-
-        client.handle_mpd_response_event(
-            mpd_response
-        )
-
-        # 3. Segment flow
-        current_time = 0.2
-
-        for segment_id in range(
-            1,
-            client.total_segments + 1
-        ):
-            print(
-                f"\n{client.client_id} requesting "
-                f"{video_name}, segment {segment_id}"
-            )
-
-            segment_request = client.create_segment_request_event(
-                event_time=current_time,
-                server_id=self.server.server_id,
-                segment_id=segment_id
-            )
-
-            self.connection.send_request_to_server(
-                segment_request
-            )
-
-            segment_response = (
-                self.server.handle_segment_request_event(
-                    request_event=segment_request,
-                    network_model=self.network_model
-                )
-            )
-
-            event_queue.add_event(
-                segment_response
-            )
-
-            while event_queue.has_events():
-                event = event_queue.get_next_event()
-
-                elapsed_time = event_queue.get_elapsed_time()
-
-                client.consume_video(
-                    elapsed_time
-                )
-
-                if event.event_type == "SEGMENT_RECEIVED":
-                    self.connection.send_response_to_client(
-                        event
-                    )
-
-                    client.handle_segment_received_event(
-                        event
-                    )
-
-                    print(
-                        f"Segment {event.segment_id} received | "
-                        f"quality={event.segment_quality} | "
-                        f"arrival={event.event_time:.3f} | "
-                        f"buffer={client.buffer_level:.3f}"
-                    )
-
-            current_time = event_queue.current_time_sec
-
-        return event_queue.current_time_sec
 
     def _print_summary(self) -> None:
         print("\n================================")
@@ -244,10 +183,118 @@ class Simulation:
     def _save_logs(self) -> None:
 
         self.logger.save(
+            run_id=self.run_id,
             clients=self.clients,
             server=self.server,
-            connection=self.connection,
+            connections=self.connections,
+            event_queue=self.event_queue,
             final_times=self.final_times
         )
     def _generate_metrics(self):
         self.metrics_generator.generate()
+
+    def _advance_all_clients(self, elapsed_time):
+        current_time_sec = (self.event_queue.current_time_sec)
+
+        for client in self.clients.values():
+            client.consume_video(
+                playback_time=elapsed_time,
+                current_time_sec=current_time_sec
+            )
+    def _dispatch_event(self, event):
+        if event.event_type == "CONNECTION_REQUEST":
+            self._handle_connection_request(event)
+
+        elif event.event_type == "CONNECTION_ESTABLISHED":
+            self._handle_connection_established(event)
+
+        elif event.event_type == "MPD_REQUEST":
+            self._handle_mpd_request(event)
+
+        elif event.event_type == "MPD_RESPONSE":
+            self._handle_mpd_response(event)
+
+        elif event.event_type == "SEGMENT_REQUEST":
+            self._handle_segment_request(event)
+
+        elif event.event_type == "SEGMENT_RECEIVED":
+            self._handle_segment_received(event)
+
+        else:
+            raise ValueError(
+            f"Unknown event type: {event.event_type}"
+        )
+
+    def _handle_connection_request(self, event):
+        connection = self.connections[event.client_id]
+        connection.send_request_to_server(event)
+        response_event = self.server.handle_connection_request_event(event)
+        self.event_queue.add_event(response_event)
+
+    def _handle_connection_established(self, event):
+
+        client = self.clients[event.client_id]
+        connection = self.connections[event.client_id]
+        connection.send_response_to_client(event)
+        connection.mark_connected()
+        client.handle_connection_established_event(event)
+        video_name = self.client_video_map[event.client_id]
+        mpd_request = client.create_mpd_request_event(
+            event_time=event.event_time + 0.1,
+            server_id=self.server.server_id,
+            video_name=video_name)
+
+        self.event_queue.add_event(mpd_request)
+    def _handle_mpd_request(self, event):
+
+        connection = self.connections[event.client_id]
+        connection.send_request_to_server(event)
+
+        response_event = self.server.handle_mpd_request_event(
+            event
+        )
+
+        self.event_queue.add_event(response_event)
+    def _handle_mpd_response(self, event):
+        client = self.clients[event.client_id]
+        connection = self.connections[event.client_id]
+
+        connection.send_response_to_client(event)
+        client.handle_mpd_response_event(event)
+        first_segment_request = client.create_segment_request_event(
+            event_time=event.event_time + 0.1,
+            server_id=self.server.server_id,
+            segment_id=1
+        )
+        self.event_queue.add_event(first_segment_request)
+
+    def _handle_segment_request(self, event):
+        connection = self.connections[event.client_id]
+        connection.send_request_to_server(event)
+        response_event = self.server.handle_segment_request_event(
+            request_event=event,
+            network_model=self.network_model
+        )
+
+        self.event_queue.add_event(response_event)
+    
+    def _handle_segment_received(self, event):
+        client = self.clients[event.client_id]
+        connection = self.connections[event.client_id]
+
+        connection.send_response_to_client(event)
+
+        client.handle_segment_received_event(event)
+
+        next_segment_id = event.segment_id + 1
+
+        if next_segment_id <= client.total_segments:
+            next_request = client.create_segment_request_event(
+                event_time=event.event_time,
+                server_id=self.server.server_id,
+                segment_id=next_segment_id
+            )
+
+            self.event_queue.add_event(next_request)
+        else:
+            self.final_times[event.client_id] = event.event_time

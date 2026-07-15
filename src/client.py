@@ -14,6 +14,22 @@ class Client:
 
         )
 
+        # Quality-switch tracking
+        self.quality_switch_count = 0
+        self.upward_switch_count = 0
+        self.downward_switch_count = 0
+        self.quality_switch_magnitudes = []
+        self.last_selected_bitrate_kbps = None
+
+
+        # Stall and rebuffer tracking
+        self.stall_count = 0
+        self.is_stalling = False
+        self.current_stall_start_time_sec = None
+        self.stall_durations_sec = []
+        self.total_rebuffer_time_sec = 0
+
+
         #ABR variables
         self.bandwidth_history=[]
         self.abr_decision_logs = []
@@ -43,10 +59,6 @@ class Client:
         # Bandwidth estimation state
         self.last_measured_bandwidth_kbps = None
 
-        # QoE tracking
-        self.total_rebuffer_time_sec = 0
-        self.quality_switch_count = 0
-        self.last_selected_bitrate_kbps = None
 
         # Client logs
         self.logs = []
@@ -77,84 +89,80 @@ class Client:
             return True
         
         return False
-# select bitrate on the basis of history bandwidth
+    # select bitrate on the basis of history bandwidth
     def select_bitrate(self):
         estimated_throughput = self.calculate_throughput()
+
+        # First segment: no bandwidth history
         if estimated_throughput is None:
             selected_bitrate = self.available_qualities[0]
+            selection_reason = "NO_BANDWIDTH_HISTORY_START_LOW"
 
-            self.last_selected_bitrate_kbps = selected_bitrate
+        else:
+            selected_bitrate = self.available_qualities[0]
+            selection_reason = "THROUGHPUT_AND_BUFFER_BASED"
 
-            self.logs.append({
-                "action": "ABR_QUALITY_SELECTED",
-                "reason": "NO_BANDWIDTH_HISTORY_START_LOW",
-                "selected_quality": selected_bitrate,
-                "buffer_level": self.buffer_level
-            })
+            for bitrate in self.available_qualities:
+                if bitrate <= estimated_throughput:
+                    selected_bitrate = bitrate
 
-            self.abr_decision_logs.append({
-                "reason": "NO_BANDWIDTH_HISTORY_START_LOW",
-                "estimated_throughput": None,
-                "available_qualities": self.available_qualities,
-                "selected_quality": selected_bitrate,
-                "buffer_level": self.buffer_level
-            })
-            return selected_bitrate
+        previous_quality = self.last_selected_bitrate_kbps
 
-        selected_bitrate = self.available_qualities[0]
+        quality_switched = False
+        quality_change_kbps = 0
+        switch_direction = "NONE"
 
-        for bitrate in self.available_qualities:
-            if bitrate <= estimated_throughput:
-                selected_bitrate = bitrate
+        if previous_quality is not None:
+            quality_change_kbps = (
+                selected_bitrate - previous_quality
+            )
 
-        if self.last_selected_bitrate_kbps is not None:
-            if selected_bitrate != self.last_selected_bitrate_kbps:
+            if selected_bitrate != previous_quality:
+                quality_switched = True
                 self.quality_switch_count += 1
 
-        self.last_selected_bitrate_kbps = selected_bitrate
+                switch_magnitude = abs(
+                    quality_change_kbps
+                )
 
-        self.logs.append({
+                self.quality_switch_magnitudes.append(
+                    switch_magnitude
+                )
+
+                if selected_bitrate > previous_quality:
+                    switch_direction = "UP"
+                    self.upward_switch_count += 1
+
+                else:
+                    switch_direction = "DOWN"
+                    self.downward_switch_count += 1
+
+        self.last_selected_bitrate_kbps = (
+            selected_bitrate
+        )
+
+        abr_log = {
             "action": "ABR_QUALITY_SELECTED",
-            "estimated_throughput": estimated_throughput,
-            "available_qualities": self.available_qualities,
+            "reason": selection_reason,
+            "previous_quality_kbps": previous_quality,
             "selected_quality": selected_bitrate,
-            "buffer_level": self.buffer_level
-        })
-
-        self.abr_decision_logs.append({
+            "quality_switched": quality_switched,
+            "quality_change_kbps": quality_change_kbps,
+            "switch_direction": switch_direction,
             "estimated_throughput": estimated_throughput,
-            "available_qualities": self.available_qualities,
-            "selected_quality": selected_bitrate,
-            "buffer_level": self.buffer_level
-        })
+            "buffer_level": self.buffer_level,
+            "quality_switch_count":self.quality_switch_count
+        }
 
-        return selected_bitrate   
-    
-    # select the best bitrate as per the bandwidth
-    def select_bitrate_old(self, current_bandwidth):
-        if current_bandwidth<=self.available_qualities[0]:
-            raise ValueError(
-                  "Bandwidth too low."
-            ) 
-        safe_bandwidth=current_bandwidth*0.8
-        for bitrate in self.available_qualities:
-            if bitrate<=safe_bandwidth:
-                selected_bitrate=bitrate
-        
-        if self.last_selected_bitrate_kbps is not None:
-            if selected_bitrate!=self.last_selected_bitrate_kbps:
-                self.quality_switch_count+=1
+        self.logs.append(abr_log)
 
-        self.last_selected_bitrate_kbps = selected_bitrate
-        
-        self.logs.append({
-            "action":"BITRATE_SELECTED",
-            "safe_bandwidth_kbps": safe_bandwidth,
-            "selected_bitrate_kbps": selected_bitrate
-        })
+        if hasattr(self, "abr_decision_logs"):
+            self.abr_decision_logs.append(
+                abr_log.copy()
+            )
 
         return selected_bitrate
-    
+     
     #This will calculate the throughput
 
     def get_average_previous_bandwidth(self, window_size=3):
@@ -175,7 +183,9 @@ class Client:
                 "action": "THROUGHPUT_ESTIMATION",
                 "reason": "NO_PREVIOUS_BANDWIDTH",
                 "estimated_throughput": None,
-                "buffer_level": self.buffer_level
+                "buffer_level": self.buffer_level,
+                "average_previous_bandwidth_kbps": None,
+                "buffer_state": "STARTUP"
             })
 
             return None
@@ -228,7 +238,7 @@ class Client:
             "buffered_segments": self.buffered_segments.copy()
         })
 
-    def consume_video(self, playback_time):
+    def consume_video_old(self, playback_time):
         if not self.playback_started:
             return 0
 
@@ -258,7 +268,86 @@ class Client:
                 self.buffered_segments.pop(0)
 
         return rebuffer_time   
-  
+    def consume_video(self,playback_time,current_time_sec=None):
+        if playback_time < 0:
+            raise ValueError(
+                "Playback time cannot be negative."
+            )
+
+        if playback_time == 0:
+            return 0
+
+        # Waiting for startup buffer is not counted as a stall.
+        if not self.playback_started:
+            return 0
+
+        remaining_playback_time = playback_time
+
+        while remaining_playback_time > 0:
+
+            if not self.buffered_segments:
+                self.buffer_level = 0
+
+                stall_start_time = (
+                    current_time_sec
+                    - remaining_playback_time
+                    if current_time_sec is not None
+                    else self.playback_position_sec
+                )
+
+                self.start_stall(
+                    current_time_sec=stall_start_time
+                )
+
+                return remaining_playback_time
+
+            current_segment = self.buffered_segments[0]
+
+            available_segment_time = (
+                current_segment[
+                    "remaining_duration_sec"
+                ]
+            )
+
+            if (
+                available_segment_time
+                > remaining_playback_time
+            ):
+                current_segment[
+                    "remaining_duration_sec"
+                ] -= remaining_playback_time
+
+                self.buffer_level -= (
+                    remaining_playback_time
+                )
+
+                self.playback_position_sec += (
+                    remaining_playback_time
+                )
+
+                remaining_playback_time = 0
+
+            else:
+                self.playback_position_sec += (
+                    available_segment_time
+                )
+
+                self.buffer_level -= (
+                    available_segment_time
+                )
+
+                remaining_playback_time -= (
+                    available_segment_time
+                )
+
+                self.buffered_segments.pop(0)
+
+        self.buffer_level = max(
+            0,
+            self.buffer_level
+        )
+
+        return 0
     #create segment request for server
     def create_segment_request_event (self,event_time,server_id,segment_id):
         selected_quality=self.select_bitrate()
@@ -282,7 +371,12 @@ class Client:
             "video_name": self.video_name,
             "segment_id": segment_id,
             "segment_quality": selected_quality,
-            "deadline_time": deadline_time
+            "deadline_time": deadline_time,
+            "buffer_before_request_sec":self.buffer_level,
+            "playback_position_before_request_sec":self.playback_position_sec,
+            "stall_count_before_request":self.stall_count,
+            "rebuffer_time_before_request_sec":self.total_rebuffer_time_sec,
+            "is_stalling_before_request":self.is_stalling
         })
         return request_event
     
@@ -295,16 +389,28 @@ class Client:
 
         self.add_to_buffer(segment_id=segment_event.segment_id,
                            segment_duration=segment_event.segment_duration)
+        
+        if self.is_stalling:
+            self.end_stall(
+                current_time_sec=
+                    segment_event.event_time
+            )
+            
         self.start_playback(segment_event.event_time)
         self.logs.append({
             "action": "SEGMENT_RECEIVED_HANDLED",
+            "event_time":segment_event.event_time,
             "segment_id": segment_event.segment_id,
             "bitrate_kbps": segment_event.segment_quality,
             "file_size_kbits": segment_event.segment_size,
             "download_time_sec": segment_event.download_time,
             "measured_bandwidth_kbps": self.last_measured_bandwidth_kbps,
-            "buffer_level": self.buffer_level,
-            "playback_started": self.playback_started
+            "buffer_after_download_sec":self.buffer_level,
+            "playback_position_after_download_sec":self.playback_position_sec,
+            "stall_count_after_download":self.stall_count,
+            "rebuffer_time_after_download_sec":self.total_rebuffer_time_sec,
+            "is_stalling_after_download":self.is_stalling,
+            "playback_started":self.playback_started
     })
     
     #connection request to server
@@ -372,26 +478,116 @@ class Client:
             "total_segments": self.total_segments
         })
 
+    def start_stall(self, current_time_sec):
+        if self.is_stalling:
+            return
 
+        self.is_stalling = True
+        self.stall_count += 1
+        self.current_stall_start_time_sec = (
+            current_time_sec
+        )
+
+        self.logs.append({
+            self.logs.append({
+                "action": "STALL_STARTED",
+                "event_time": current_time_sec,
+
+                "client_id": self.client_id,
+                "video_name": self.video_name,
+
+                "stall_number": self.stall_count,
+
+                "playback_position_sec":
+                    self.playback_position_sec,
+
+                "buffer_level_sec":
+                    self.buffer_level,
+
+                "total_rebuffer_time_before_stall_sec":
+                    self.total_rebuffer_time_sec
+            })
+        })
+    def end_stall(
+        self,
+        current_time_sec
+    ):
+        if not self.is_stalling:
+            return 0
+
+        stall_duration_sec = (
+            current_time_sec
+            - self.current_stall_start_time_sec
+        )
+
+        if stall_duration_sec < 0:
+            raise ValueError(
+                "Stall duration cannot be negative."
+            )
+
+        self.stall_durations_sec.append(
+            stall_duration_sec
+        )
+
+        self.total_rebuffer_time_sec += (
+            stall_duration_sec
+        )
+
+        self.logs.append({
+            "action": "STALL_ENDED",
+            "event_time": current_time_sec,
+
+            "client_id": self.client_id,
+            "video_name": self.video_name,
+
+            "stall_number":
+                self.stall_count,
+
+            "stall_duration_sec":
+                stall_duration_sec,
+
+            "total_rebuffer_time_sec":
+                self.total_rebuffer_time_sec,
+
+            "playback_position_sec":
+                self.playback_position_sec,
+
+            "buffer_level_sec":
+                self.buffer_level
+        })
+
+        print(
+            f"[STALL END] "
+            f"client={self.client_id} | "
+            f"time={current_time_sec:.3f} | "
+            f"duration={stall_duration_sec:.3f}"
+        )
+
+        self.is_stalling = False
+        self.current_stall_start_time_sec = None
+
+        return stall_duration_sec
+
+            
+        #1. client connect to server(tcp connection)
+        #2. after connection established: client request for video information(request for mpd file for a, filename(input variable))
+        #take into consideration about the different encodings the mpd file.
+        #3. respondse form server mpd file.
+        #----loop----(handled through event list)
+        # 4. clinet request first segment
+        #5. server will psend the segment
+        #6. server trigger response SegmentRequestEvent
+        #7. calculation of deadline depening on buffer level.
+        #8. test for more users.(has its own trace file, vidoe files.)
+        
+
+
+        #   --------------------------------------------------------------------
+        
+
+        # agentic
+
+        # explore library: what are the options, how to build shared memory . crewAI.,
+        # autogen, langchain(explore)
 
         
-      #1. client connect to server(tcp connection)
-      #2. after connection established: client request for video information(request for mpd file for a, filename(input variable))
-      #take into consideration about the different encodings the mpd file.
-      #3. respondse form server mpd file.
-      #----loop----(handled through event list)
-      # 4. clinet request first segment
-      #5. server will psend the segment
-      #6. server trigger response SegmentRequestEvent
-      #7. calculation of deadline depening on buffer level.
-      #8. test for more users.(has its own trace file, vidoe files.)
-
-    #   --------------------------------------------------------------------
-    
-
-    # agentic
-
-    # explore library: what are the options, how to build shared memory . crewAI.,
-    # autogen, langchain(explore)
-
-    

@@ -36,7 +36,7 @@ class ConnectionHandler:
         return established_event
 
     def send_request_to_server(self, request_event):
-        if not self.is_connected:
+        if not self.is_connected  and request_event.event_type != "CONNECTION_REQUEST":
             raise Exception("Connection is not established")
 
         self.messages.append({
@@ -48,7 +48,7 @@ class ConnectionHandler:
         return request_event
 
     def send_response_to_client(self, response_event):
-        if not self.is_connected:
+        if not self.is_connected and response_event.event_type!="CONNECTION_ESTABLISHED":
             raise Exception("Connection is not established")
 
         self.messages.append({
@@ -60,5 +60,11 @@ class ConnectionHandler:
         return response_event
 
     def show_messages(self):
+        
         for message in self.messages:
             print(message)
+    def mark_connected(self):
+        self.is_connected = True
+        print(
+            f"Connection {self.connection_id} established"
+        )

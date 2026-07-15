@@ -1,4 +1,6 @@
 {
+
+
   "server": {
     "server_id": "server_1",
     "ip_address": "127.0.0.1",
@@ -7,7 +9,7 @@
 
     "output_log_file": "outputs/logs/simulation_logs.json",
     "output_metrics_directory": "outputs/metrics",
-    
+
   "videos": [
     {
       "video_name": "video_1",
